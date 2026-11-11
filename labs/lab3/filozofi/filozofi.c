@@ -1,109 +1,102 @@
 #include <stdlib.h>
 #include <stdio.h>
-#include <stdint.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <unistd.h>
 
 #define NUM_PHILOSOPHERS 5
-#define NUM_MEALS        10       // Koliko puta svaki filozof treba da jede
-#define EATING_TIME      200000   // (0.2 s)
-#define THINKING_TIME    300000   // us (0.3 s)
+#define NUM_MEALS        10
+#define EATING_TIME      200000 // microseconds
+#define THINKING_TIME    300000 // microseconds
 
-// Jedan semafor po viljuski: 1 = viljuska je slobodna, 0 = neko je drzi
+// One binary semaphore per fork: value 1 = fork is free, 0 = someone holds it 
 static sem_t forks[NUM_PHILOSOPHERS];
-
-// "Soba": u nju smiju istovremeno najvise 4 filozofa. Ovo sprecava deadlock
+/* Deadlock prevention: lets at most N-1 philosophers try to pick up forks.
+   Without it, all 5 could take their left fork at once and wait forever
+   for the right one (circular wait). With 4 at the table, at least one
+   always gets both forks. */
 static sem_t room;
-
-// Mutex za ispis, da se ispisi razlicitih niti ne pomijesaju
+// Protects stdout so messages from different threads don't get mixed up
 static pthread_mutex_t printLock;
-
-// Broj obroka koje je svaki filozof pojeo (svaki filozof pise samo u svoje polje)
+// Each thread writes only its own element, and main reads after join, so no lock is needed
 static int mealsEaten[NUM_PHILOSOPHERS];
 
 static void print_message (int id, const char *message)
 {
     pthread_mutex_lock(&printLock);
-    printf("Filozof %d %s\n", id, message);
+    printf("Philosopher %d %s\n", id, message);
     fflush(stdout);
     pthread_mutex_unlock(&printLock);
 }
 
-// Tijelo niti filozofa
 void* philosopher (void *pParam)
 {
-    int id = (int)(intptr_t)pParam;
-    int leftFork  = id;                              // viljuska lijevo od filozofa 
-    int rightFork = (id + 1) % NUM_PHILOSOPHERS;     // viljuska desno od filozofa 
-    unsigned int seed = id + 1;                      // za razlicita nasumicna vremena 
+    const int id = *(const int*)pParam;
+    const int leftFork  = id;
+    const int rightFork = (id + 1) % NUM_PHILOSOPHERS; // Wraps around for the last philosopher
+    unsigned int seed = id + 1;
+    
     int i;
-
     for (i = 0; i < NUM_MEALS; i++)
     {
-        // 1. Razmisljanje
-        print_message(id, "razmislja.");
-        usleep(THINKING_TIME / 2 + rand_r(&seed) % THINKING_TIME);
+        print_message(id, "is thinking.");
+        // Sleeps (frees the CPU for other threads) for a random time between 150 ms and 450 ms
+        usleep(THINKING_TIME / 2 + rand_r(&seed) % THINKING_TIME);  
 
-        // 2. Ogladnio je: trazi mjesto u sobi
-        print_message(id, "je gladan.");
+        print_message(id, "is hungry.");
         sem_wait(&room);
 
-        // 3. Uzima viljuske jednu po jednu
         sem_wait(&forks[leftFork]);
-        print_message(id, "uzeo prvu viljusku.");
+        print_message(id, "picked up the first fork.");
         sem_wait(&forks[rightFork]);
-        print_message(id, "uzeo drugu viljusku.");
+        print_message(id, "picked up the second fork.");
 
-        // 4. Jede
-        print_message(id, "JEDE.");
+        print_message(id, "is EATING.");
+        // Sleeps (frees the CPU for other threads) for a random time between 100 ms and 300 ms
         usleep(EATING_TIME / 2 + rand_r(&seed) % EATING_TIME);
         mealsEaten[id]++;
 
-        // 5. Vraca viljuske i napusta sobu
         sem_post(&forks[leftFork]);
         sem_post(&forks[rightFork]);
         sem_post(&room);
     }
 
-    print_message(id, "je zavrsio (pojeo sve obroke).");
-    return 0;
+    print_message(id, "has finished (ate all meals).");
+    return NULL;
 }
 
 int main (void)
 {
-    pthread_t hPhilosopher[NUM_PHILOSOPHERS];
+    pthread_t tPhilosopher[NUM_PHILOSOPHERS];
+    int ids[NUM_PHILOSOPHERS];
     int i;
 
-    // Sve viljuske su na pocetku slobodne
     for (i = 0; i < NUM_PHILOSOPHERS; i++)
     {
         sem_init(&forks[i], 0, 1);
     }
 
-    
     sem_init(&room, 0, NUM_PHILOSOPHERS - 1);
 
     pthread_mutex_init(&printLock, NULL);
 
     for (i = 0; i < NUM_PHILOSOPHERS; i++)
     {
-        pthread_create(&hPhilosopher[i], NULL, philosopher, (void*)(intptr_t)i);
+        ids[i] = i;
+        pthread_create(&tPhilosopher[i], NULL, philosopher, &ids[i]);
     }
 
-    // Cekanje da svi filozofi zavrse
     for (i = 0; i < NUM_PHILOSOPHERS; i++)
     {
-        pthread_join(hPhilosopher[i], NULL);
+        pthread_join(tPhilosopher[i], NULL);
     }
 
-    printf("\nBroj obroka po filozofu:\n");
+    printf("\nMeals per philosopher:\n");
     for (i = 0; i < NUM_PHILOSOPHERS; i++)
     {
-        printf("Filozof %d: %d\n", i, mealsEaten[i]);
+        printf("Philosopher %d: %d\n", i, mealsEaten[i]);
     }
 
-    // Oslobadjanje resursa
     for (i = 0; i < NUM_PHILOSOPHERS; i++)
     {
         sem_destroy(&forks[i]);
